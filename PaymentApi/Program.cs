@@ -1,16 +1,17 @@
-using Common.Extentions;
 using Microsoft.Extensions.Options;
+using Microsoft.EntityFrameworkCore;
 
-using Common.Helpers;
 using Common.Models;
 using Data.DbContexts;
-using Microsoft.EntityFrameworkCore;
+using PaymentApi.Endpoints;
+using PaymentApi.Extentions;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddPersistance(builder.Configuration);
 builder.Services.AddHttpContextAccessor();
-
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
 builder.Services.AddDbContext<PaymentDbContext>(
     (serviceProvider, dbContextOptionsBuilder) =>
     {
@@ -29,7 +30,13 @@ builder.Services.AddDbContext<PaymentDbContext>(
     });
 
 var app = builder.Build();
-
-app.MapGet("/", () => "Hello World!");
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+app.AddClickEndpoints();
+app.AddPaymeEndpoints();
+app.AppPaymentEndpoints();
 
 app.Run();

@@ -11,5 +11,6 @@ public enum PaymeErrorCode
     IncorrectAmount = -31001,
     TransactionNotFound = -31003,
     CantContinueOperation = -31008,
-    IncorrectData = -31050 // до -31099
+    IncorrectData = -31050, // до -31099
+    ChequeEnded = -31007
 }

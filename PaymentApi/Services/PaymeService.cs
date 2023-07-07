@@ -2,10 +2,16 @@ using Common.Enums;
 using Common.Payme.Enums;
 using Common.Payme.Exeptions;
 using Common.Payme.Requests;
+using Common.Payme.Requests.CancelTransaction;
+using Common.Payme.Requests.CheckPerform;
+using Common.Payme.Requests.CheckTransaction;
+using Common.Payme.Requests.CreateTransaction;
+using Common.Payme.Requests.PerformTransaction;
 using Common.Payme.Responses;
 using Data.Entities;
 using Data.Repositories;
 using Microsoft.EntityFrameworkCore;
+using TransactionCancellationReason = Common.Click.Enums.TransactionCancellationReason;
 
 namespace PaymentApi.Services;
 
@@ -21,7 +27,8 @@ public class PaymeService
         _chequeRepository = chequeRepository;
     }
 
-    public async Task<PaymeResponse<CheckPerformTransactionResponse>> CheckPerformTransaction(PaymeRequest request)
+    public async Task<PaymeResponse<CheckPerformTransactionResponse>> CheckPerformTransaction(
+        CheckPerformTransactionRequest request)
     {
         var cheque = await _chequeRepository.GetAsync(s =>
             s.UniqueId == request.Parameters.AccountRequest.UniqueId && s.Amount == request.Parameters.Amount);
@@ -80,20 +87,20 @@ public class PaymeService
 
     public async Task<PaymeResponse<CreateTransactionResponse>> CreateTransaction(CreateTransactionRequest request)
     {
-        var cheque = await _chequeRepository.GetAsync(s => s.UniqueId == request.Id,
+        var cheque = await _chequeRepository.GetAsync(s => s.UniqueId == request.Parameters.Account.UniqueId,
             a => a.Include(s => s.PaymeTransaction));
 
         if (cheque is null || cheque.Status is not ChequeStatus.New)
             throw new PaymeTranactionException(PaymeErrorCode.IncorrectData);
 
-        if (cheque.Amount != request.Amount)
+        if (cheque.Amount != request.Parameters.Amount)
             throw new PaymeTranactionException(PaymeErrorCode.IncorrectAmount);
-        
+
         var tranaction = await _paymeRepository.AddAsync(new PaymeTransaction()
         {
             ChequeId = cheque.Id.Value,
             PaymeTransactionId = cheque.UniqueId,
-            State = PaymeTransactionState.CreatingTransaction,
+            State = PaymeTransactionState.WaitingConfirmation,
             TransactionResult = null,
             CreateTransactionTime = new DateTimeOffset(DateTime.UtcNow).ToUnixTimeMilliseconds(),
             CreateTransactionDateTime = DateTime.Now
@@ -113,91 +120,143 @@ public class PaymeService
         };
     }
 
-    public async Task<PaymeResponse<PerformTransactionResult>> PerformTransaction(string transactionId)
+    public async Task<PaymeResponse<PerformTransactionResult>> PerformTransaction(PerformTransactionRequest request)
     {
-        var tranaction = await _paymeRepository.GetAsync(s=>s.PaymeTransactionId == transactionId, a=>a.Include(s=>s.Cheque));
-        
-        if(tranaction is null ||
+        var tranaction = await _paymeRepository.GetAsync(s => s.PaymeTransactionId == request.Parameters.Id,
+            a => a.Include(s => s.Cheque));
+
+        if (tranaction is null ||
             tranaction.State is not PaymeTransactionState.WaitingConfirmation ||
             tranaction.Cheque is null ||
             tranaction.Cheque.Status is not ChequeStatus.Process)
             throw new PaymeTranactionException(PaymeErrorCode.TransactionNotFound);
-        
+
         tranaction.PerformTransactionDateTime = DateTime.Now;
         tranaction.PerformTransactionTime = new DateTimeOffset(DateTime.UtcNow).ToUnixTimeMilliseconds();
+        tranaction.Cheque.Status = ChequeStatus.Paying;
+        tranaction.Cheque.EpsSystem = EpsSystem.Payme;
         await _paymeRepository.UpdateAsync(tranaction);
-        
+
         return new PaymeResponse<PerformTransactionResult>()
         {
             Result = new PerformTransactionResult()
             {
                 PerformTime = tranaction.PerformTransactionTime,
                 State = (int)PaymeResponseType.Close,
-                TransactionId = transactionId
+                TransactionId = request.Parameters.Id
             }
         };
     }
-    
-    public async Task<PaymeResponse<CheckTransactionResult>> CheckTransaction(long id)
+
+    public async Task<PaymeResponse<CheckTransactionResponse>> CheckTransaction(CheckTransactionRequest request)
     {
-        HttpClient client = new HttpClient();
-        client.BaseAddress = new Uri(_config.BasePaymentUrl + "/payme/transaction/");
+        var cheque = await _chequeRepository.GetAsync(s => s.UniqueId == request.Parameters.Id,
+            a => a.Include(s => s.PaymeTransaction));
+        if (cheque == null || cheque.PaymeTransaction == null)
+            throw new PaymeTranactionException(PaymeErrorCode.TransactionNotFound);
 
-        var api = await client.PostAsJsonAsync("check", id);
-        var result = JsonConvert.DeserializeObject<PaymentResponse<PaymeTransactionDTO>>(await api.Content.ReadAsStringAsync());
+        if (cheque.PaymeTransaction.State is not PaymeTransactionState.CompletedSuccessfully
+            or PaymeTransactionState.WaitingConfirmation)
+            throw new PaymeTranactionException(PaymeErrorCode.CantContinueOperation);
 
-        if (result.Type == PaymentResponseType.Cancelled || result.Type == PaymentResponseType.Failed)
-        {
-            return new PaymeResponse<CheckTransactionResult>
+        if (cheque.PaymeTransaction.State is PaymeTransactionState.CompletedSuccessfully)
+            return new PaymeResponse<CheckTransactionResponse>()
             {
-                result = new CheckTransactionResult()
+                Result = new CheckTransactionResponse()
                 {
-                    transaction = id,
-                    state = (int)PaymeTransactionState.Canceled,
-                    reason = (int)PaymeTransactionResult.TransactionFailed
+                    TransactionId = request.Parameters.Id,
+                    State = (int)PaymeTransactionState.CompletedSuccessfully,
+                    PerformTime = cheque.PaymeTransaction.PerformTransactionTime
+                }
+            };
+
+        if ((DateTime.Now - cheque.PaymeTransaction.CreateTransactionDateTime).Hours > 10)
+        {
+            await CancelTransaction(new CancelTransactionRequest()
+            {
+                Parameters = new CancelTransactionRequestParameters()
+                {
+                    Id = request.Parameters.Id,
+                    Reason = Common.Payme.Enums.TransactionCancellationReason.TransactionTimedOut
+                }
+            });
+            throw new PaymeTranactionException(PaymeErrorCode.CantContinueOperation, "Время оплаты трансакции истекло");
+        }
+
+        cheque.PaymeTransaction.State = PaymeTransactionState.CompletedSuccessfully;
+        cheque.Status = ChequeStatus.Paying;
+        
+        await _chequeRepository.UpdateAsync(cheque);
+
+        return new PaymeResponse<CheckTransactionResponse>()
+        {
+            Result = new CheckTransactionResponse()
+            {
+                State = (int)cheque.Status,
+                PerformTime = cheque.PaymeTransaction.PerformTransactionTime,
+                TransactionId = request.Parameters.Id,
+            }
+        };
+    }
+
+    public async Task<PaymeResponse<CancelTransactionResponse>> CancelTransaction(CancelTransactionRequest request)
+    {
+        var cheque = await _chequeRepository.GetAsync(s => s.UniqueId == request.Parameters.Id,
+            a => a.Include(s => s.PaymeTransaction));
+
+        if (cheque == null || cheque.PaymeTransaction == null)
+            throw new PaymeTranactionException(PaymeErrorCode.TransactionNotFound);
+
+        if (cheque.PaymeTransaction.State == PaymeTransactionState.WaitingConfirmation)
+        {
+            cheque.Status = ChequeStatus.Cancel;
+            cheque.PaymeTransaction.State = PaymeTransactionState.WaitingConfirmationCancelled;
+            cheque.PaymeTransaction.CancelTransactionTime =
+                new DateTimeOffset(DateTime.UtcNow).ToUnixTimeMilliseconds();
+            cheque.PaymeTransaction.CancelTransactionDateTime = DateTime.Now;
+            await _chequeRepository.UpdateAsync(cheque);
+            return new PaymeResponse<CancelTransactionResponse>()
+            {
+                Result = new CancelTransactionResponse()
+                {
+                    State = (int)PaymeTransactionState.WaitingConfirmationCancelled,
+                    TransactionId = request.Parameters.Id,
+                    CancelTime = cheque.PaymeTransaction.CancelTransactionTime
                 }
             };
         }
 
-        var bill = result.PaymentObject;
+        if (!cheque.CanCancel)
+            throw new PaymeTranactionException(PaymeErrorCode.ChequeEnded);
 
-        return new PaymeResponse<CheckTransactionResult>()
+        if (cheque.PaymeTransaction.State is PaymeTransactionState.CompletedSuccessfully)
         {
-            result = new CheckTransactionResult()
+            cheque.Status = ChequeStatus.Cancel;
+            cheque.PaymeTransaction.State = PaymeTransactionState.CompletedSuccessfullyCancelled;
+            cheque.PaymeTransaction.CancelTransactionTime =
+                new DateTimeOffset(DateTime.UtcNow).ToUnixTimeMilliseconds();
+            cheque.PaymeTransaction.CancelTransactionDateTime = DateTime.Now;
+            await _chequeRepository.UpdateAsync(cheque);
+
+            return new PaymeResponse<CancelTransactionResponse>()
             {
-                create_time = bill.CreateTransactionTime,
-                perform_time = bill.PerformTransactionTime,
-                cancel_time = bill.CancelTransactionTime,
-                transaction = bill.PaymeTransactionId,
-                state = (int)bill.State,
-                reason = (int)bill.TransactionResult
-            }
-        };
-    }
-    
-    public async Task<PaymeResponse<CancelTransactionResult>> CancelTransaction(string id, PaymeTransactionResult reason)
-    {
-        var result = await _siteApiService.Cancel(id, reason);
-
-        if (result.Type == PaymentResponseType.Failed)
-        {
-            throw new TransactionNotFoundException();
+                Result = new CancelTransactionResponse()
+                {
+                    TransactionId = request.Parameters.Id,
+                    CancelTime = new DateTimeOffset(DateTime.UtcNow).ToUnixTimeMilliseconds(),
+                    State = (int)PaymeTransactionState.CompletedSuccessfullyCancelled
+                }
+            };
         }
 
-        return new PaymeResponse<CancelTransactionResult>()
+        return new PaymeResponse<CancelTransactionResponse>()
         {
-            result = new CancelTransactionResult()
+            Result = new CancelTransactionResponse()
             {
-                transaction = id,
-                cancel_time = GetTimeStamp(),
-                state = (int)PaymentResponseType.Cancelled
-
+                CancelTime = cheque.PaymeTransaction.CancelTransactionTime,
+                State = (int)cheque.PaymeTransaction.State,
+                TransactionId = request.Parameters.Id
             }
         };
-    }
-    
-    private long GetTimeStamp()
-    {
-        return ;
     }
 }

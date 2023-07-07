@@ -1,5 +1,4 @@
 using Microsoft.Extensions.Options;
-using Microsoft.Extensions.Configuration;
 
 using Common.Models;
 
@@ -22,7 +21,7 @@ public class DatabaseOptionsHelper : IConfigureOptions<DatabaseOptionsModel>
         
         model.ConnectionString = connectionString;
         
-        _configuration.GetSection(SectionName).Bind(model);
+        _configuration.GetSection(DbOptionSectionName).Bind(model);
         
     }
 }

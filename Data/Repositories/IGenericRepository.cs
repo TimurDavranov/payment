@@ -9,6 +9,7 @@ public interface IGenericRepository<TEntity>
     Task<List<TEntity>> GetAllAsync(Expression<Func<TEntity, bool>> expression, Func<IQueryable<TEntity>, IIncludableQueryable<TEntity, object>>? include = null);
     Task<TEntity> GetAsync(Expression<Func<TEntity, bool>>? expression = null, Func<IQueryable<TEntity>, IIncludableQueryable<TEntity, object>>? include = null);
     Task<long> CountAsync(Expression<Func<TEntity, bool>>? expression = null);
+    Task<bool> AnyAsync(Expression<Func<TEntity, bool>>? expression = null);
     IQueryable<TEntity> GetQueryable();
     
     Task UpdateAsync(TEntity entity);

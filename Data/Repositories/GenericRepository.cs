@@ -45,7 +45,15 @@ public class GenericRepository<TEntity> : IGenericRepository<TEntity> where TEnt
         
         return await _context.Set<TEntity>().CountAsync(expression);
     }
-    
+
+    public async Task<bool> AnyAsync(Expression<Func<TEntity, bool>>? expression = null)
+    {
+        if (expression == null)
+            return await _context.Set<TEntity>().AnyAsync();
+
+        return await _context.Set<TEntity>().AnyAsync(expression);
+    }
+
     public IQueryable<TEntity> GetQueryable()
     {
         return _context.Set<TEntity>().AsQueryable();
